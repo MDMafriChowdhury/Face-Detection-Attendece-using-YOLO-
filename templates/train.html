@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Train New User</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+            background-color: #f0f2f5;
+            margin: 0;
+            color: #333;
+        }
+        h1 { color: #1c1e21; font-weight: 600; text-align: center; }
+        #video-container {
+            position: relative; width: 90%; max-width: 640px; border-radius: 12px;
+            overflow: hidden; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); background-color: #000;
+        }
+        #video-feed { width: 100%; height: auto; display: block; transform: scaleX(-1); }
+        #snapshot-canvas { display: none; }
+        .btn {
+            font-size: 1.1rem; font-weight: 600; padding: 12px 24px; border-radius: 8px;
+            border: none; cursor: pointer; transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); margin: 5px;
+        }
+        #btn-start { background-color: #0866ff; color: white; }
+        #btn-toggle-camera { background-color: #6c757d; color: white; }
+        .btn:disabled { background-color: #ccc; cursor: not-allowed; }
+        #controls, #training-ui { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; justify-content: center; }
+        #name-input { font-size: 1.1rem; padding: 10px; border-radius: 8px; border: 1px solid #ccc; }
+        #instructions {
+            margin-top: 16px; font-size: 1.2rem; font-weight: 600; height: 30px;
+            text-align: center; color: #f02849;
+        }
+        #progress-bar {
+            width: 90%; max-width: 640px; height: 20px; background-color: #e9ecef;
+            border-radius: 10px; overflow: hidden; margin-top: 10px;
+        }
+        #progress-fill {
+            width: 0%; height: 100%; background-color: #42b72a;
+            transition: width 0.1s linear;
+        }
+        #feedback-message {
+            margin-top: 16px; font-size: 1.1rem; font-weight: 600; height: 24px;
+            text-align: center;
+        }
+        .feedback-success { color: #42b72a; }
+        .feedback-error { color: #f02849; }
+        #training-ui { display: none; } /* Hidden by default */
+    </style>
+</head>
+<body>
+    <h1>Train New User</h1>
+
+    <!-- Step 1: Get Name -->
+    <div id="name-prompt">
+        <label for="name-input" style="font-weight: 600;">Enter Your Name:</label>
+        <input type="text" id="name-input" placeholder="e.g., John Doe">
+        <button id="btn-start" class="btn">Start Training</button>
+    </div>
+
+    <!-- Step 2: Training UI (Video, etc.) -->
+    <div id="training-ui">
+        <div id="video-container">
+            <video id="video-feed" autoplay playsinline muted></video>
+        </div>
+        <canvas id="snapshot-canvas"></canvas>
+
+        <div id="instructions">Get Ready...</div>
+        <div id="progress-bar"><div id="progress-fill"></div></div>
+        <p id="feedback-message"></p>
+        <button id="btn-toggle-camera" class="btn">Toggle Camera</button>
+        <a href="/" class="btn" style="background-color: #6c757d; color: white; text-decoration: none;">Back to App</a>
+    </div>
+
+    <script>
+        // DOM Elements
+        const namePrompt = document.getElementById('name-prompt');
+        const trainingUI = document.getElementById('training-ui');
+        const videoEl = document.getElementById('video-feed');
+        const canvasEl = document.getElementById('snapshot-canvas');
+        const startBtn = document.getElementById('btn-start');
+        const toggleBtn = document.getElementById('btn-toggle-camera');
+        const nameInput = document.getElementById('name-input');
+        const instructionsEl = document.getElementById('instructions');
+        const feedbackEl = document.getElementById('feedback-message');
+        const progressFill = document.getElementById('progress-fill');
+
+        // State
+        let currentStream;
+        let currentFacingMode = 'user';
+        let trainingUser = { id: null, name: null };
+        let totalSamples = 0;
+        let captureInterval;
+
+        // Training definition
+        const STAGES = [
+            { instruction: "Look STRAIGHT at the camera", samples: 30 },
+            { instruction: "Slowly turn your head LEFT", samples: 30 },
+            { instruction: "Slowly turn your head RIGHT", samples: 30 },
+            { instruction: "Slowly tilt your head UP", samples: 30 },
+            { instruction: "Slowly tilt your head DOWN", samples: 30 },
+            { instruction: "Move SLIGHTLY CLOSER", samples: 20 },
+            { instruction: "Move SLIGHTLY FARTHER", samples: 20 }
+        ];
+        const SAMPLES_PER_STAGE = 190; // Total from STAGES
+        const CAPTURE_INTERVAL_MS = 150; // Capture faster for training
+
+        // --- 1. Start Camera (Shared) ---
+        async function startStream(facingMode) {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+            try {
+                const constraints = { video: { facingMode: facingMode, width: { ideal: 640 }, height: { ideal: 480 } } };
+                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                videoEl.srcObject = currentStream;
+                videoEl.onloadedmetadata = () => {
+                    canvasEl.width = videoEl.videoWidth;
+                    canvasEl.height = videoEl.videoHeight;
+                    videoEl.style.transform = (facingMode === 'user') ? 'scaleX(-1)' : 'scaleX(1)';
+                };
+            } catch (err) {
+                instructionsEl.textContent = "Camera Error. Check permissions.";
+                showFeedback("Could not access camera. Check permissions and HTTPS.", false);
+            }
+        }
+
+        // --- 2. Toggle Camera ---
+        toggleBtn.addEventListener('click', () => {
+            currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
+            startStream(currentFacingMode);
+        });
+
+        // --- 3. Start Button Click ---
+        startBtn.addEventListener('click', async () => {
+            const name = nameInput.value.trim();
+            if (!name) {
+                showFeedback("Please enter a name.", false);
+                return;
+            }
+
+            startBtn.disabled = true;
+            startBtn.textContent = "Setting up...";
+
+            try {
+                // Create or find user
+                const response = await fetch('/start_training', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: name })
+                });
+                const data = await response.json();
+
+                if (!data.success) {
+                    throw new Error(data.message);
+                }
+
+                trainingUser = { id: data.user_id, name: data.user_name };
+                
+                // Switch UI
+                namePrompt.style.display = 'none';
+                trainingUI.style.display = 'flex';
+                
+                // Start camera and then training
+                await startStream(currentFacingMode);
+                runTrainingSequence();
+
+            } catch (err) {
+                showFeedback(err.message, false);
+                startBtn.disabled = false;
+                startBtn.textContent = "Start Training";
+            }
+        });
+
+        // --- 4. Training Sequence ---
+        async function runTrainingSequence() {
+            totalSamples = 0;
+            
+            for (const stage of STAGES) {
+                instructionsEl.textContent = `Get Ready: ${stage.instruction}`;
+                await new Promise(resolve => setTimeout(resolve, 3000)); // Pause for 3s
+                instructionsEl.textContent = `Capturing: ${stage.instruction}`;
+                
+                let samplesThisStage = 0;
+                await new Promise(resolve => {
+                    captureInterval = setInterval(async () => {
+                        if (samplesThisStage >= stage.samples) {
+                            clearInterval(captureInterval);
+                            resolve();
+                            return;
+                        }
+
+                        const success = await captureAndSendFrame();
+                        if (success) {
+                            samplesThisStage++;
+                            totalSamples++;
+                            updateProgress(totalSamples, SAMPLES_PER_STAGE);
+                        }
+                    }, CAPTURE_INTERVAL_MS);
+                });
+            }
+
+            // --- 5. Finalize Training ---
+            instructionsEl.textContent = "Training model... Please wait.";
+            showFeedback("This may take a moment...", true);
+            
+            try {
+                const response = await fetch('/run_model_training', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                if (!data.success) throw new Error(data.message);
+                
+                instructionsEl.textContent = "Training Complete!";
+                showFeedback(`User '${trainingUser.name}' trained successfully!`, true);
+
+            } catch (err) {
+                instructionsEl.textContent = "Training Failed";
+                showFeedback(err.message, false);
+            }
+        }
+
+        // --- 6. Capture and Send Frame ---
+        async function captureAndSendFrame() {
+            const context = canvasEl.getContext('2d');
+            if (currentFacingMode === 'user') {
+                context.save();
+                context.scale(-1, 1);
+                context.drawImage(videoEl, -canvasEl.width, 0, canvasEl.width, canvasEl.height);
+                context.restore();
+            } else {
+                context.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+            }
+            const imageData = canvasEl.toDataURL('image/jpeg', 0.8);
+
+            try {
+                const response = await fetch('/capture_frame', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        image: imageData,
+                        user_id: trainingUser.id,
+                        count: totalSamples + 1 // Use total count for unique file name
+                    })
+                });
+                const data = await response.json();
+                if (!data.success) {
+                    showFeedback(data.message, false); // "No face detected"
+                    return false;
+                }
+                showFeedback("", true); // Clear error
+                return true;
+            } catch (err) {
+                console.error(err);
+                return false;
+            }
+        }
+
+        // --- 7. UI Helpers ---
+        function updateProgress(current, total) {
+            const percent = (current / total) * 100;
+            progressFill.style.width = `${percent}%`;
+        }
+
+        function showFeedback(message, isSuccess) {
+            feedbackEl.textContent = message;
+            feedbackEl.className = isSuccess ? 'feedback-success' : 'feedback-error';
+        }
+
+    </script>
+</body>
+</html>

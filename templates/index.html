@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Attendance System</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background-color: #f0f2f5;
+            margin: 0;
+            color: #333;
+        }
+        h1 {
+            color: #1c1e21;
+            font-weight: 600;
+            text-align: center;
+        }
+        #video-container {
+            position: relative;
+            width: 90%;
+            max-width: 640px;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            background-color: #000;
+        }
+        #video-feed {
+            width: 100%;
+            height: auto;
+            display: block;
+            /* Flip the video if it's the front camera */
+            transform: scaleX(-1);
+        }
+        #detection-status {
+            margin-top: 16px;
+            font-size: 1.2rem;
+            font-weight: 600;
+            height: 30px;
+            text-align: center;
+            color: #1c1e21;
+        }
+        #controls {
+            display: flex;
+            flex-wrap: wrap; /* Allow buttons to wrap on small screens */
+            gap: 16px;
+            margin-top: 16px;
+            justify-content: center;
+        }
+        .btn {
+            font-size: 1.1rem;
+            font-weight: 600;
+            padding: 12px 24px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            text-decoration: none; /* For link button */
+        }
+        #btn-checkin {
+            background-color: #42b72a;
+            color: white;
+        }
+        #btn-checkin:hover {
+            background-color: #36a420;
+        }
+        #btn-checkout {
+            background-color: #f02849;
+            color: white;
+        }
+        #btn-checkout:hover {
+            background-color: #d9203d;
+        }
+        #btn-toggle-camera {
+            background-color: #0866ff;
+            color: white;
+        }
+        #btn-toggle-camera:hover {
+            background-color: #0655d4;
+        }
+        /* New button style */
+        #btn-train {
+            background-color: #6c757d;
+            color: white;
+        }
+        #btn-train:hover {
+            background-color: #5a6268;
+        }
+        #feedback-message {
+            margin-top: 16px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            height: 24px;
+            text-align: center;
+            transition: opacity 0.3s ease;
+        }
+        .feedback-success {
+            color: #42b72a;
+        }
+        .feedback-error {
+            color: #f02849;
+        }
+
+        /* Hidden canvas for taking snapshots */
+        #snapshot-canvas {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Face Attendance System</h1>
+
+    <div id="video-container">
+        <!-- This <video> tag will show the user's *own* camera -->
+        <video id="video-feed" autoplay playsinline muted></video>
+    </div>
+    
+    <!-- This canvas is used (hidden) to grab frames -->
+    <canvas id="snapshot-canvas"></canvas>
+
+    <div id="detection-status">Initializing Camera...</div>
+
+    <div id="controls">
+        <button id="btn-toggle-camera" class="btn">Toggle Camera</button>
+        <button id="btn-checkin" class="btn">Check In</button>
+        <button id="btn-checkout" class="btn">Check Out</button>
+        <!-- This is the button you are asking for -->
+        <a href="/train" id="btn-train" class="btn">Train New User</a>
+    </div>
+
+    <p id="feedback-message"></p>
+
+    <script>
+        // Get all DOM elements
+        const videoEl = document.getElementById('video-feed');
+        const canvasEl = document.getElementById('snapshot-canvas');
+        const toggleBtn = document.getElementById('btn-toggle-camera');
+        const checkinBtn = document.getElementById('btn-checkin');
+        const checkoutBtn = document.getElementById('btn-checkout');
+        const feedbackEl = document.getElementById('feedback-message');
+        const statusEl = document.getElementById('detection-status');
+
+        // State variables
+        let currentStream;
+        let currentFacingMode = 'user'; // 'user' = front camera, 'environment' = back
+        let currentRecognizedUser = { user_id: null, user_name: null };
+        let recognitionInterval;
+        let feedbackTimer;
+        const RECOGNITION_INTERVAL_MS = 1000; // Send 1 frame per second
+
+        // --- 1. Start Camera Stream ---
+        async function startStream(facingMode) {
+            // Stop any existing stream
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+
+            try {
+                const constraints = {
+                    video: {
+                        facingMode: facingMode,
+                        width: { ideal: 640 }, // Request a reasonable size
+                        height: { ideal: 480 }
+                    }
+                };
+                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                videoEl.srcObject = currentStream;
+
+                // Set canvas size once video is playing
+                videoEl.onloadedmetadata = () => {
+                    canvasEl.width = videoEl.videoWidth;
+                    canvasEl.height = videoEl.videoHeight;
+                    // Flip front camera video, but not snapshot
+                    if (facingMode === 'user') {
+                        videoEl.style.transform = 'scaleX(-1)';
+                    } else {
+                        videoEl.style.transform = 'scaleX(1)';
+                    }
+                };
+
+                statusEl.textContent = "Looking for face...";
+
+            } catch (err) {
+                console.error("Error accessing camera:", err);
+                statusEl.textContent = "Camera Error: Access Denied.";
+                // Use the feedback element instead of an alert
+                showFeedback("Could not access camera. Check permissions and HTTPS.", false);
+            }
+        }
+
+        // --- 2. Toggle Camera ---
+        toggleBtn.addEventListener('click', () => {
+            currentFacingMode = (currentFacingMode === 'user') ? 'environment' : 'user';
+            startStream(currentFacingMode);
+        });
+
+        // --- 3. Send Frame for Recognition (Loop) ---
+        async function recognizeFrame() {
+            if (!currentStream || videoEl.paused || videoEl.ended) {
+                return; // Don't run if video isn't ready
+            }
+
+            // Draw current video frame to canvas
+            const context = canvasEl.getContext('2d');
+            
+            // Flip the canvas drawing if it's the front camera
+            if (currentFacingMode === 'user') {
+                context.save();
+                context.scale(-1, 1);
+                context.drawImage(videoEl, -canvasEl.width, 0, canvasEl.width, canvasEl.height);
+                context.restore();
+            } else {
+                context.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
+            }
+
+            // Get image data from canvas
+            const imageData = canvasEl.toDataURL('image/jpeg', 0.8); // 80% quality
+
+            try {
+                const response = await fetch('/recognize_frame', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: imageData })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Server error: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                // Update UI and state
+                if (data.status === 'known') {
+                    statusEl.textContent = `Detected: ${data.user_name} (${data.confidence}%)`;
+                    currentRecognizedUser = { user_id: data.user_id, user_name: data.user_name };
+                } else if (data.status === 'unknown') {
+                    statusEl.textContent = `Detected: Unknown (${data.confidence}%)`;
+                    currentRecognizedUser = { user_id: null, user_name: null };
+                } else if (data.status === 'no_face') {
+                    statusEl.textContent = "Looking for face...";
+                    currentRecognizedUser = { user_id: null, user_name: null };
+                }
+
+            } catch (err) {
+                console.error("Recognition error:", err);
+                statusEl.textContent = "Recognition Error";
+                // Stop the loop if server fails
+                if (recognitionInterval) clearInterval(recognitionInterval);
+            }
+        }
+
+        // --- 4. Send Attendance Action ---
+        async function sendAction(actionType) {
+            // Check if a user is currently recognized
+            if (!currentRecognizedUser.user_id) {
+                showFeedback("No known face is detected.", false);
+                return;
+            }
+
+            try {
+                const response = await fetch('/attendance_action', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        action: actionType,
+                        user_id: currentRecognizedUser.user_id,
+                        user_name: currentRecognizedUser.user_name
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+                showFeedback(data.message, data.success);
+
+            } catch (error) {
+                console.error('Error sending action:', error);
+                showFeedback('Client-side error. See console.', false);
+            }
+        }
+
+        // --- 5. Helper Function for Feedback ---
+        function showFeedback(message, isSuccess) {
+            if (feedbackTimer) clearTimeout(feedbackTimer);
+            feedbackEl.textContent = message;
+            feedbackEl.className = isSuccess ? 'feedback-success' : 'feedback-error';
+            feedbackTimer = setTimeout(() => {
+                feedbackEl.textContent = '';
+                feedbackEl.className = '';
+            }, 3000);
+        }
+
+        // --- 6. Add Button Listeners ---
+        checkinBtn.addEventListener('click', () => sendAction('check-in'));
+        checkoutBtn.addEventListener('click', () => sendAction('check-out'));
+
+        // --- 7. Initialize ---
+        (async () => {
+            // Check for HTTPS
+            if (window.location.protocol !== "https:") {
+                statusEl.textContent = "Error: Must use HTTPS for camera.";
+                showFeedback("Please use https:// link, not http://", false);
+                return;
+            }
+            await startStream(currentFacingMode); // Start camera
+            // Start the recognition loop
+            recognitionInterval = setInterval(recognizeFrame, RECOGNITION_INTERVAL_MS);
+        })();
+
+    </script>
+
+</body>
+</html>
+
