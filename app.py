@@ -4,10 +4,11 @@ import numpy as np
 import sqlite3
 import time
 import datetime
-from flask import Flask, Response, render_template, request, jsonify
+from flask import Flask, Response, render_template, request, jsonify, make_response
 import base64
 import io
 from PIL import Image
+from fpdf import FPDF
 
 # --- Configuration ---
 HAAR_CASCADE_PATH = 'haarcascade_frontalface_default.xml'
@@ -221,6 +222,28 @@ def load_recognizer():
     except cv2.error as e:
         print(f"Error loading recognizer: {e}. Is trainer.yml valid?")
 
+# --- NEW HELPER: Format Duration ---
+def format_duration(seconds):
+    """Converts seconds into a human-readable Hh Mm Ss format."""
+    if seconds is None or seconds < 0:
+        return "N/A"
+    if seconds == 0:
+        return "0m 0s"
+        
+    hours = int(seconds // 3600)
+    seconds %= 3600
+    minutes = int(seconds // 60)
+    seconds = int(seconds % 60)
+    
+    parts = []
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    if seconds > 0 or not parts:
+        parts.append(f"{seconds}s")
+        
+    return " ".join(parts)
 
 # --- Flask API Routes ---
 
@@ -362,6 +385,273 @@ def run_model_training():
         print(f"Error during training: {e}")
         return jsonify({"success": False, "message": f"Error during training: {e}"})
 
+# --- PDF Helper Class (MODIFIED) ---
+class PDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 12)
+        self.cell(0, 10, 'Attendance Report', 0, 1, 'C')
+        self.ln(10)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+    
+    def report_table(self, data, col_widths):
+        self.set_font('Arial', 'B', 10)
+        
+        # Headers (MODIFIED)
+        headers = ['Name', 'Date', 'First In', 'Last Out', 'Total Duration', 'All Sessions']
+        col_keys = ['name', 'date', 'first_in', 'last_out', 'duration', 'sessions']
+        
+        for i, header in enumerate(headers):
+            self.cell(col_widths[col_keys[i]], 10, header, 1, 0, 'C')
+        self.ln()
+        
+        # Data (MODIFIED - Using MultiCell for robust row height)
+        self.set_font('Arial', '', 9)
+        if not data:
+            self.cell(sum(col_widths.values()), 10, 'No data found for this selection.', 1, 1, 'C')
+            return
+            
+        for row in data:
+            start_y = self.get_y()
+            
+            # Create a list of all data points for the row
+            row_data_points = [
+                str(row['name']),
+                str(row['event_date']),
+                str(row['first_check_in']),
+                str(row['last_check_out']),
+                str(row['total_duration_formatted']),
+                str(row['all_sessions']) # The new multi-line data
+            ]
+            
+            max_y = start_y
+            
+            # Draw all cells as MultiCells to handle wrapping and get max height
+            cell_heights = []
+            
+            # First pass: Draw MultiCells and find max height
+            current_x = self.get_x()
+            for i, key in enumerate(col_keys):
+                width = col_widths[key]
+                self.multi_cell(width, 8, row_data_points[i], 0, 'L')
+                cell_heights.append(self.get_y())
+                current_x += width
+                self.set_xy(current_x, start_y) # Reset Y for next cell
+            
+            max_y = max(cell_heights)
+            
+            # Second pass: Draw the borders based on max_y
+            current_x = self.l_margin
+            self.set_xy(current_x, start_y) # Go back to start of row
+            for i, key in enumerate(col_keys):
+                width = col_widths[key]
+                # Draw border for the full height of the row
+                self.rect(current_x, start_y, width, max_y - start_y)
+                current_x += width
+            
+            self.set_xy(self.l_margin, max_y) # Move to the next line
+
+# --- Internal Helper for fetching report data (MODIFIED) ---
+
+def _get_report_data(user_id, start_date, end_date):
+    """Internal function to query the DB for a smart summary report."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    conn.row_factory = sqlite3.Row # This lets us access columns by name
+    cursor = conn.cursor()
+    
+    params = []
+    conditions = []
+    
+    # Build WHERE conditions for the CTE
+    if user_id:
+        conditions.append("e.user_id = ?")
+        params.append(user_id)
+    if start_date:
+        conditions.append("DATE(e.timestamp) >= ?")
+        params.append(start_date)
+    if end_date:
+        conditions.append("DATE(e.timestamp) <= ?")
+        params.append(end_date)
+    
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    # This is the new "smart" query to calculate daily summaries
+    query = f"""
+    WITH PairedEvents AS (
+        SELECT
+            e.user_id,
+            e.event_type,
+            e.timestamp,
+            DATE(e.timestamp) AS event_date,
+            TIME(e.timestamp) AS event_time,
+            LEAD(e.event_type, 1) OVER (
+                PARTITION BY e.user_id, DATE(e.timestamp) 
+                ORDER BY e.timestamp
+            ) AS next_event_type,
+            LEAD(e.timestamp, 1) OVER (
+                PARTITION BY e.user_id, DATE(e.timestamp) 
+                ORDER BY e.timestamp
+            ) AS next_timestamp
+        FROM events e
+        WHERE {where_clause}
+    ),
+    
+    Calculations AS (
+        SELECT
+            user_id,
+            event_date,
+            
+            -- Calculate duration for valid pairs
+            CASE
+                WHEN event_type = 'check-in' AND next_event_type = 'check-out'
+                THEN (strftime('%s', next_timestamp) - strftime('%s', timestamp))
+                ELSE 0
+            END AS duration_seconds,
+            
+            -- Create a string for each valid session
+            CASE
+                WHEN event_type = 'check-in' AND next_event_type = 'check-out'
+                THEN TIME(timestamp) || ' - ' || TIME(next_timestamp)
+                ELSE NULL
+            END AS session_string,
+            
+            -- Flag for first check-in
+            CASE
+                WHEN event_type = 'check-in'
+                THEN event_time
+                ELSE NULL
+            END AS check_in_time,
+            
+            -- Flag for last check-out
+            CASE
+                WHEN event_type = 'check-out'
+                THEN event_time
+                ELSE NULL
+            END AS check_out_time
+            
+        FROM PairedEvents
+    )
+    
+    SELECT
+        u.name,
+        c.event_date,
+        MIN(c.check_in_time) AS first_check_in,
+        MAX(c.check_out_time) AS last_check_out,
+        SUM(c.duration_seconds) AS total_duration_seconds,
+        -- Use GROUP_CONCAT to combine all session strings, separated by a newline
+        -- MODIFIED: Replaced FILTER clause with a CASE statement for wider SQLite compatibility
+        GROUP_CONCAT(CASE WHEN c.session_string IS NOT NULL THEN c.session_string ELSE NULL END, CHAR(10)) AS all_sessions
+    FROM Calculations c
+    JOIN users u ON u.user_id = c.user_id
+    GROUP BY u.name, c.event_date
+    HAVING first_check_in IS NOT NULL -- Only show days where user was present
+    ORDER BY c.event_date DESC, u.name;
+    """
+
+    try:
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        # Convert rows to dicts and format the duration
+        report_data = []
+        for row in rows:
+            row_dict = dict(row)
+            row_dict['total_duration_formatted'] = format_duration(row_dict.get('total_duration_seconds'))
+            # Handle NULLs from DB
+            if not row_dict['first_check_in']:
+                row_dict['first_check_in'] = "---"
+            if not row_dict['last_check_out']:
+                row_dict['last_check_out'] = "---"
+            if not row_dict['all_sessions']:
+                row_dict['all_sessions'] = "No sessions"
+            report_data.append(row_dict)
+            
+        return report_data, None
+    except sqlite3.Error as e:
+        print(f"Error fetching smart report: {e}")
+        return None, str(e)
+    finally:
+        conn.close()
+
+
+# --- NEW REPORTING & ADMIN ROUTES ---
+
+@app.route('/reports')
+def reports_page():
+    """Serves the new reports/admin page."""
+    return render_template('reports.html')
+
+@app.route('/api/users', methods=['GET'])
+def get_all_users():
+    """Fetches all users for the report filter dropdown."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT user_id, name FROM users ORDER BY name")
+        users = cursor.fetchall()
+        # Convert list of tuples to list of dicts for easier JSON
+        user_list = [{"user_id": row[0], "name": row[1]} for row in users]
+        return jsonify(user_list)
+    except sqlite3.Error as e:
+        print(f"Error fetching all users: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/attendance_report', methods=['GET'])
+def get_attendance_report_json():
+    """Provides the attendance report data as JSON for the web table."""
+    user_id = request.args.get('user_id')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    
+    data, error = _get_report_data(user_id, start_date, end_date)
+    
+    if error:
+        return jsonify({"error": error}), 500
+    return jsonify(data)
+
+@app.route('/api/download_pdf', methods=['GET'])
+def download_pdf_report():
+    """Generates and serves the attendance report as a PDF download."""
+    user_id = request.args.get('user_id')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+
+    data, error = _get_report_data(user_id, start_date, end_date)
+    
+    if error:
+        return f"Error generating report: {error}", 500
+    
+    # --- FIX: Instantiate the PDF object ---
+    # MODIFIED: Set orientation and format in the constructor, not add_page()
+    pdf = PDF(orientation='L', format='A4')
+    pdf.add_page() # Use Landscape mode for more space
+    
+    # Define column widths (MODIFIED)
+    col_widths = {
+        'name': 45,
+        'date': 25,
+        'first_in': 25,
+        'last_out': 25,
+        'duration': 30,
+        'sessions': 127 # Total 277, fits A4-L page
+    }
+    
+    pdf.report_table(data, col_widths)
+
+    # Generate a dynamic filename
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"attendance_report_{timestamp}.pdf"
+    
+    # Create a response and send the PDF data
+    response = make_response(pdf.output(dest='S').encode('latin-1'))
+    response.headers['Content-Type'] = 'application/pdf'
+    response.headers['Content-Disposition'] = f'attachment; filename={filename}'
+    return response
+
 
 # --- Main ---
 if __name__ == "__main__":
@@ -371,4 +661,3 @@ if __name__ == "__main__":
     print("[INFO] Starting Flask server...")
     print("[INFO] To access from your phone, use https://<YOUR_PC_IP_ADDRESS>:5000")
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, use_reloader=False, ssl_context='adhoc')
-
