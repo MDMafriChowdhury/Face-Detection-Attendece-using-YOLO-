@@ -2,6 +2,12 @@
 
 # Web-Based Face Recognition Attendance System Using Flask App and YOLO model
 
+## Project Description
+
+Odoo Face Attendance is a web-based kiosk application that uses facial recognition to manage employee attendance, posting all check-in and check-out events directly to your Odoo database in real-time.
+
+This project consists of a Python Flask server that handles face detection (using OpenCV) and communicates with Odoo (using odoorpc). It provides a simple web interface for training new employees, a kiosk interface for daily attendance, and a reporting dashboard that pulls live data from Odoo.
+
 ## Installation
 
 Clone or download this repository to your computer.
