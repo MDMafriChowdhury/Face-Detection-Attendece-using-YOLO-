@@ -34,6 +34,7 @@ Face_Attendance_App/
 ├── templates/                            # Flask templates folder
 │   ├── index.html                        # Main attendance page
 │   └── train.html                        # User training page
+│   └── reports.html                      # Admin attendence reports page
 │
 ├── dataset/                              # (Auto-created) Stores training images
 │
