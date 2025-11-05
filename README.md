@@ -101,6 +101,8 @@ Smart attendance logic ensures:
 
 - Click "Download PDF" to save the same report as a PDF.
 
+
+
 # Technologies Used
 
 Flask – Web framework for backend logic
