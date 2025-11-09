@@ -45,6 +45,12 @@ Face_Attendance_App/
 ```
 
 ## Usage
+First, "Git Bash here to the project folder and then run below command
+```bash
+openssl req -new -x509 -days 365 -nodes -out cert.pem -keyout key.pem
+```
+Then
+
 ```bash
 python run_server.py
 ```
