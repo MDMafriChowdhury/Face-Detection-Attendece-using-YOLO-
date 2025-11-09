@@ -35,19 +35,14 @@ Face_Attendance_App/
 │
 ├── app.py                                # Main Flask server (run this file)
 ├── run_server.py 
-│
-├── haarcascade_frontalface_default.xml   # OpenCV face detection model
+│l
 │
 ├── templates/                            # Flask templates folder
 │   ├── index.html                        # Main attendance page
 │   └── train.html                        # User training page
 │   └── reports.html                      # Admin attendence reports page
-│
-├── dataset/                              # (Auto-created) Stores training images
-│
-├── attendance.db                         # (Auto-created) SQLite database
-│
-└── trainer.yml                           # (Auto-created) Trained recognition model
+│                            
+
 
 ```
 
