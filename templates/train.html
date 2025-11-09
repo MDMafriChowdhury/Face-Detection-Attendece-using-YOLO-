@@ -93,22 +93,24 @@
         // State
         let currentStream;
         let currentFacingMode = 'user';
-        let trainingUser = { id: null, name: null };
+        let trainingUserName = null; // We only need the name
         let totalSamples = 0;
         let captureInterval;
 
-        // Training definition
+        // --- NEW: Simplified Training ---
+        // We only need ~30-50 samples for this new smart model.
         const STAGES = [
-            { instruction: "Look STRAIGHT at the camera", samples: 30 },
-            { instruction: "Slowly turn your head LEFT", samples: 30 },
-            { instruction: "Slowly turn your head RIGHT", samples: 30 },
-            { instruction: "Slowly tilt your head UP", samples: 30 },
-            { instruction: "Slowly tilt your head DOWN", samples: 30 },
-            { instruction: "Move SLIGHTLY CLOSER", samples: 20 },
-            { instruction: "Move SLIGHTLY FARTHER", samples: 20 }
+            { instruction: "Look STRAIGHT at the camera", samples: 5 },
+            { instruction: "Slowly turn your head LEFT", samples: 5 },
+            { instruction: "Slowly turn your head RIGHT", samples: 5 },
+            { instruction: "Slowly tilt your head UP", samples: 5 },
+            { instruction: "Slowly tilt your head DOWN", samples: 5 },
+            { instruction: "Move SLIGHTLY CLOSER", samples: 3 },
+            { instruction: "Move SLIGHTLY FARTHER", samples: 3 }
         ];
-        const SAMPLES_PER_STAGE = 190; // Total from STAGES
-        const CAPTURE_INTERVAL_MS = 150; // Capture faster for training
+        // Calculate total samples from STAGES
+        const SAMPLES_PER_STAGE = STAGES.reduce((acc, stage) => acc + stage.samples, 0);
+        const CAPTURE_INTERVAL_MS = 250; // Capture a bit slower
 
         // --- 1. Start Camera (Shared) ---
         async function startStream(facingMode) {
@@ -136,19 +138,21 @@
             startStream(currentFacingMode);
         });
 
-        // --- 3. Start Button Click ---
+        // --- 3. Start Button Click (UPDATED) ---
         startBtn.addEventListener('click', async () => {
             const name = nameInput.value.trim();
             if (!name) {
                 showFeedback("Please enter a name.", false);
                 return;
             }
+            // !! IMPORTANT !!
+            alert("CRITICAL: The name you entered:\n\n'" + name + "'\n\nMust EXACTLY match the employee name in Odoo.");
 
             startBtn.disabled = true;
             startBtn.textContent = "Setting up...";
 
             try {
-                // Create or find user
+                // Call /start_training to clear old encodings
                 const response = await fetch('/start_training', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -160,7 +164,7 @@
                     throw new Error(data.message);
                 }
 
-                trainingUser = { id: data.user_id, name: data.user_name };
+                trainingUserName = data.name; // Store the name
                 
                 // Switch UI
                 namePrompt.style.display = 'none';
@@ -177,39 +181,44 @@
             }
         });
 
-        // --- 4. Training Sequence ---
+        // --- 4. Training Sequence (UPDATED for new total) ---
         async function runTrainingSequence() {
             totalSamples = 0;
             
+            // Helper function to pause
+            const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
             for (const stage of STAGES) {
+                // 1. Show "Get Ready" message
                 instructionsEl.textContent = `Get Ready: ${stage.instruction}`;
-                await new Promise(resolve => setTimeout(resolve, 3000)); // Pause for 3s
+                await delay(2500); // Pause for 2.5s
+
+                // 2. Start capturing for this stage
                 instructionsEl.textContent = `Capturing: ${stage.instruction}`;
                 
                 let samplesThisStage = 0;
-                await new Promise(resolve => {
-                    captureInterval = setInterval(async () => {
-                        if (samplesThisStage >= stage.samples) {
-                            clearInterval(captureInterval);
-                            resolve();
-                            return;
-                        }
-
-                        const success = await captureAndSendFrame();
-                        if (success) {
-                            samplesThisStage++;
-                            totalSamples++;
-                            updateProgress(totalSamples, SAMPLES_PER_STAGE);
-                        }
-                    }, CAPTURE_INTERVAL_MS);
-                });
+                // Use a simple 'while' loop instead of setInterval
+                // This is much more stable and easier to read
+                while (samplesThisStage < stage.samples) {
+                    const success = await captureAndSendFrame();
+                    if (success) {
+                        // Only increment if capture was successful
+                        samplesThisStage++;
+                        totalSamples++;
+                        updateProgress(totalSamples, SAMPLES_PER_STAGE);
+                    }
+                    // Wait before capturing the next frame
+                    // We can reuse the CAPTURE_INTERVAL_MS constant
+                    await delay(CAPTURE_INTERVAL_MS); 
+                }
             }
 
             // --- 5. Finalize Training ---
-            instructionsEl.textContent = "Training model... Please wait.";
-            showFeedback("This may take a moment...", true);
+            instructionsEl.textContent = "Saving encodings... Please wait.";
+            showFeedback("This should be quick...", true);
             
             try {
+                // This route just saves the data captured in memory
                 const response = await fetch('/run_model_training', {
                     method: 'POST'
                 });
@@ -217,7 +226,7 @@
                 if (!data.success) throw new Error(data.message);
                 
                 instructionsEl.textContent = "Training Complete!";
-                showFeedback(`User '${trainingUser.name}' trained successfully!`, true);
+                showFeedback(`User '${trainingUserName}' trained successfully!`, true);
 
             } catch (err) {
                 instructionsEl.textContent = "Training Failed";
@@ -225,7 +234,7 @@
             }
         }
 
-        // --- 6. Capture and Send Frame ---
+        // --- 6. Capture and Send Frame (UPDATED) ---
         async function captureAndSendFrame() {
             const context = canvasEl.getContext('2d');
             if (currentFacingMode === 'user') {
@@ -239,18 +248,18 @@
             const imageData = canvasEl.toDataURL('image/jpeg', 0.8);
 
             try {
+                // Send the name, not the user_id
                 const response = await fetch('/capture_frame', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ 
                         image: imageData,
-                        user_id: trainingUser.id,
-                        count: totalSamples + 1 // Use total count for unique file name
+                        name: trainingUserName 
                     })
                 });
                 const data = await response.json();
                 if (!data.success) {
-                    showFeedback(data.message, false); // "No face detected"
+                    showFeedback(data.message, false); // "No face detected", "Multiple faces"
                     return false;
                 }
                 showFeedback("", true); // Clear error

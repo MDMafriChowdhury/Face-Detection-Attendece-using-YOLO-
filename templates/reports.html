@@ -41,6 +41,16 @@
             border-radius: var(--border-radius);
             box-shadow: var(--shadow);
         }
+
+        .warning-box {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeeba;
+            padding: 15px;
+            border-radius: var(--border-radius);
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
         
         .controls { 
             margin-bottom: 24px; 
@@ -224,6 +234,8 @@
 <body>
     <div class="container">
         <h1>Attendance Report</h1>
+
+
         
         <div class="controls">
             <div class="control-group">
@@ -386,8 +398,7 @@
                         </td>
                     `;
                     reportTableBody.appendChild(tr);
-                    // --- THIS IS THE FIX ---
-                    // The variable is 'observer', not 'Services.obs'
+                    // Add to observer
                     observer.observe(tr);
                 });
             }
@@ -408,6 +419,7 @@
                 entries.forEach(entry => {
                     if (entry.isIntersecting) {
                         entry.target.classList.add('visible');
+                        observer.unobserve(entry.target); // Animate only once
                     }
                 });
             }, { threshold: 0.1 });
