@@ -1,6 +1,6 @@
 
 
-# OdooFaceTrack Web Based Face Attendance System Using Flask and YOLO
+#  Odoo DeepFace Web Based Face Attendance System Using Flask
 
 ## Project Description
 
